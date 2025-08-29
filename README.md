@@ -30,9 +30,13 @@ This server exposes a single tool that allows users to execute GraphQL queries a
 
 ## Server Connection Details
 
-To connect an MCP client to this server, use the following SSE (Server-Sent Events) endpoint:
+This server supports two transport protocols for connecting MCP clients:
 
-`https://open-targets-mcp-server.quentincody.workers.dev/sse`
+### Streamable HTTP Transport (Recommended)
+
+For new integrations, use the Streamable HTTP endpoint which provides better reliability and infrastructure compatibility:
+
+`https://open-targets-mcp-server.quentincody.workers.dev/mcp`
 
 **Configuration for Claude Desktop:**
 
@@ -45,13 +49,32 @@ To connect an MCP client to this server, use the following SSE (Server-Sent Even
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://open-targets-mcp-server.quentincody.workers.dev/sse"
+        "https://open-targets-mcp-server.quentincody.workers.dev/mcp"
       ]
     }
     ```
     *   Ensure this new entry is correctly placed within the `mcpServers` JSON object (e.g., add a comma after the preceding entry if it's not the first).
     *   `"open-targets-worker"` is a suggested name; you can choose any descriptive name.
 4.  Save the configuration file.
+
+### SSE Transport (Legacy Support)
+
+For backward compatibility with existing clients, the original SSE (Server-Sent Events) endpoint is still available:
+
+`https://open-targets-mcp-server.quentincody.workers.dev/sse`
+
+**Legacy Configuration for Claude Desktop:**
+
+    ```json
+    "open-targets-worker": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://open-targets-mcp-server.quentincody.workers.dev/sse"
+      ]
+    }
+    ```
+
 5.  Restart Claude Desktop. The new server and its tools should become available.
 
 ## Using the `opentargets_graphql_query` Tool

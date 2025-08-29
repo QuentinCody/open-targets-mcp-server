@@ -345,9 +345,45 @@ export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const url = new URL(request.url);
 
+        // NEW: Streamable HTTP transport (MCP 2025-03-26 specification)
+        if (url.pathname === "/mcp" || url.pathname.startsWith("/mcp/")) {
+            const protocolVersion = request.headers.get("MCP-Protocol-Version");
+            
+            // @ts-ignore - Streamable HTTP transport handling
+            const response = await OpenTargetsMCP.serve("/mcp").fetch(request, env, ctx);
+            
+            // Add protocol version header if provided in request
+            if (protocolVersion && response instanceof Response) {
+                const headers = new Headers(response.headers);
+                headers.set("MCP-Protocol-Version", protocolVersion);
+                return new Response(response.body, {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers
+                });
+            }
+            
+            return response;
+        }
+
+        // LEGACY: SSE transport (maintain backward compatibility)
         if (url.pathname === "/sse" || url.pathname.startsWith("/sse/")) {
+            const protocolVersion = request.headers.get("MCP-Protocol-Version");
+            
             // @ts-ignore - SSE transport handling
-            return OpenTargetsMCP.serveSSE("/sse").fetch(request, env, ctx);
+            const response = await OpenTargetsMCP.serveSSE("/sse").fetch(request, env, ctx);
+            
+            if (protocolVersion && response instanceof Response) {
+                const headers = new Headers(response.headers);
+                headers.set("MCP-Protocol-Version", protocolVersion);
+                return new Response(response.body, {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers
+                });
+            }
+            
+            return response;
         }
 
         if (url.pathname === "/datasets" && request.method === "GET") {
@@ -424,7 +460,11 @@ export default {
         }
 
         return new Response(
-            `${API_CONFIG.name} - Available on /sse endpoint`,
+            `${API_CONFIG.name}
+
+Available endpoints:
+- /mcp (Streamable HTTP transport - recommended)
+- /sse (SSE transport - legacy support)`,
             { status: 404, headers: { "Content-Type": "text/plain" } }
         );
     },
