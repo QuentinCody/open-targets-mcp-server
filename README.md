@@ -12,6 +12,8 @@ Commercial and non-academic use follows the standard MIT License terms without t
 
 By using this software, you agree to these terms. See [LICENSE.md](LICENSE.md) for the complete license text.This guide provides instructions for utilizing the Open Targets MCP Server to query the Open Targets Platform API via Model Context Protocol (MCP) clients such as Claude Desktop.
 
+**📋 IMPORTANT: For correct GraphQL query examples and common mistake avoidance, see [GRAPHQL_EXAMPLES.md](GRAPHQL_EXAMPLES.md)**
+
 ## Overview
 
 This MCP server provides a bridge to the [Open Targets Platform API](https://platform.opentargets.org/data-code-access/graphql-api). The Open Targets Platform integrates evidence from genetics, genomics, transcriptomics, drugs, animal models, and scientific literature to score and rank target-disease associations for drug discovery.

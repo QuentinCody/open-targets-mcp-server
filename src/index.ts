@@ -22,7 +22,95 @@ const API_CONFIG = {
 	tools: {
 		graphql: {
 			name: "opentargets_graphql_query",
-			description: "Executes GraphQL queries against the Open Targets Platform API, processes responses into SQLite tables, and returns metadata for subsequent SQL querying.\n\n**Two-Phase Workflow:**\n1. **Data Staging**: This tool executes your GraphQL query and automatically converts the response into normalized SQLite tables\n2. **SQL Analysis**: Use the returned data_access_id with the SQL query tool to perform complex analytical queries\n\n**Open Targets Platform Overview:**\nThe Open Targets Platform integrates evidence from genetics, genomics, transcriptomics, drugs, animal models and scientific literature to score and rank target-disease associations for drug discovery.\n\n**Key API Entities:**\n- **target**: Gene/protein targets (by Ensembl ID) - genetic constraints, tractability, expression\n- **disease**: Diseases/phenotypes (by EFO ID) - ontology, known drugs, clinical signs  \n- **drug**: Compounds/drugs (by ChEMBL ID) - mechanisms of action, indications\n- **associationsOnTheFly**: Target-disease associations with evidence scores\n- **search**: Cross-entity search functionality\n\nReturns a data_access_id for subsequent SQL querying of the staged data."
+			description: `Executes GraphQL queries against the Open Targets Platform API, processes responses into SQLite tables, and returns metadata for subsequent SQL querying.
+
+**Two-Phase Workflow:**
+1. **Data Staging**: This tool executes your GraphQL query and automatically converts the response into normalized SQLite tables
+2. **SQL Analysis**: Use the returned data_access_id with the SQL query tool to perform complex analytical queries
+
+**Open Targets Platform Overview:**
+The Open Targets Platform integrates evidence from genetics, genomics, transcriptomics, drugs, animal models and scientific literature to score and rank target-disease associations for drug discovery.
+
+**CRITICAL: GraphQL Best Practices:**
+- ALWAYS provide required parameters (check with introspection first)
+- Use exact field names from the schema (case-sensitive)
+- Use schema introspection to discover available fields and arguments
+
+**Key API Entities & Required Parameters:**
+- **target(ensemblId: String!)**: Single target by Ensembl ID (REQUIRED)
+- **targets(ensemblIds: [String!]!)**: Multiple targets (REQUIRED ensemblIds array)
+- **disease(efoId: String!)**: Single disease by EFO ID (REQUIRED)
+- **diseases(efoIds: [String!]!)**: Multiple diseases (REQUIRED efoIds array)
+- **drug(chemblId: String!)**: Single drug by ChEMBL ID (REQUIRED)
+- **drugs(chemblIds: [String!]!)**: Multiple drugs (REQUIRED chemblIds array)
+- **search(queryString: String!, entityNames: [String!])**: General search
+
+**Correct Query Examples:**
+\`\`\`graphql
+# Single target query (CORRECT)
+query GetTarget {
+  target(ensemblId: "ENSG00000169083") {
+    id
+    approvedSymbol
+    approvedName
+    biotype
+  }
+}
+
+# Multiple targets query (CORRECT)
+query GetTargets {
+  targets(ensemblIds: ["ENSG00000169083", "ENSG00000146648"]) {
+    id
+    approvedSymbol
+    approvedName
+  }
+}
+
+# Search for diseases (CORRECT)
+query SearchDiseases {
+  search(queryString: "cancer", entityNames: ["disease"]) {
+    hits {
+      id
+      name
+      category
+    }
+  }
+}
+
+# Target-disease associations (CORRECT)
+query GetTargetDiseases {
+  target(ensemblId: "ENSG00000169083") {
+    id
+    approvedSymbol
+    associatedDiseases {
+      count
+      rows {
+        disease { id name }
+        score
+      }
+    }
+  }
+}
+\`\`\`
+
+**Schema Introspection (Recommended First):**
+Always start with introspection to understand available fields:
+\`\`\`graphql
+{
+  __type(name: "Query") {
+    fields {
+      name
+      description
+      args {
+        name
+        type { name kind ofType { name } }
+      }
+    }
+  }
+}
+\`\`\`
+
+Returns a data_access_id for subsequent SQL querying of the staged data.`
 		},
 		sql: {
 			name: "opentargets_query_sql", 
@@ -65,6 +153,27 @@ export class OpenTargetsMCP extends McpAgent {
 			},
             async ({ query, variables }) => {
                 try {
+                    // Validate query before execution
+                    const validation = this.validateAndSuggestQuery(query);
+                    if (!validation.isValid && validation.suggestions) {
+                        return {
+                            content: [{
+                                type: "text" as const,
+                                text: JSON.stringify({
+                                    success: false,
+                                    error: "Query validation failed",
+                                    suggestions: validation.suggestions,
+                                    corrected_examples: {
+                                        "For diseases": "diseases(efoIds: [\"EFO_0000270\"]) { id name }",
+                                        "For targets": "targets(ensemblIds: [\"ENSG00000169083\"]) { id approvedSymbol }",
+                                        "For search": "search(queryString: \"cancer\", entityNames: [\"disease\"]) { hits { id name } }",
+                                        "Schema introspection": "{ __type(name: \"Query\") { fields { name args { name type { name } } } } }"
+                                    }
+                                }, null, 2)
+                            }]
+                        };
+                    }
+
                     const graphqlResult = await this.executeGraphQLQuery(query, variables);
 
                     if (this.shouldBypassStaging(graphqlResult, query)) {
@@ -120,6 +229,47 @@ export class OpenTargetsMCP extends McpAgent {
 	}
 
 	// ========================================
+	// QUERY VALIDATION AND ERROR PREVENTION
+	// ========================================
+	
+	private validateAndSuggestQuery(query: string): { isValid: boolean; suggestions?: string[] } {
+		const suggestions: string[] = [];
+		const queryLower = query.toLowerCase();
+		
+		// Only check for DEFINITELY WRONG patterns - be very conservative
+		
+		// Check for field names that definitely don't exist
+		if (queryLower.includes('items')) {
+			suggestions.push("❌ FIELD ERROR: 'items' field doesn't exist in Open Targets API. Check schema with introspection.");
+		}
+		
+		// Check for likely missing required parameters - these are well-established
+		if (queryLower.includes('diseases(') && !queryLower.includes('efoids') && !queryLower.includes('associateddiseases')) {
+			suggestions.push("❌ MISSING REQUIRED PARAMETER: 'diseases' requires 'efoIds: [String!]!' parameter.");
+			suggestions.push('💡 SUGGESTION: Use \'diseases(efoIds: ["EFO_0000270"])\' or search first: \'search(queryString: "cancer", entityNames: ["disease"])\'');
+		}
+		
+		if (queryLower.includes('targets(') && !queryLower.includes('ensemblids') && !queryLower.includes('associatedtargets')) {
+			suggestions.push("❌ MISSING REQUIRED PARAMETER: 'targets' requires 'ensemblIds: [String!]!' parameter.");
+			suggestions.push('💡 SUGGESTION: Use \'targets(ensemblIds: ["ENSG00000169083"])\' or search first: \'search(queryString: "BRCA1", entityNames: ["target"])\'');
+		}
+		
+		if (queryLower.includes('drugs(') && !queryLower.includes('chemblids') && !queryLower.includes('knowndrugs')) {
+			suggestions.push("❌ MISSING REQUIRED PARAMETER: 'drugs' requires 'chemblIds: [String!]!' parameter.");
+			suggestions.push('💡 SUGGESTION: Use \'drugs(chemblIds: ["CHEMBL1201236"])\' or search first: \'search(queryString: "aspirin", entityNames: ["drug"])\'');
+		}
+		
+		// For the original problematic pattern from user's example
+		if (queryLower.includes('diseases(page:') && queryLower.includes('rows {') && !queryLower.includes('associateddiseases')) {
+			suggestions.push("❌ WRONG COMBINATION: 'diseases' query with pagination and 'rows' field doesn't work.");
+			suggestions.push("💡 Use 'diseases(efoIds: [...])' for multiple diseases or 'search(...)' to find disease IDs first");
+		}
+		
+		return {
+			isValid: suggestions.length === 0,
+			suggestions: suggestions.length > 0 ? suggestions : undefined
+		};
+	}	// ========================================
 	// GRAPHQL CLIENT - Open Targets API
 	// ========================================
     private async executeGraphQLQuery(query: string, variables?: Record<string, any>): Promise<any> {
@@ -176,64 +326,28 @@ export class OpenTargetsMCP extends McpAgent {
     private shouldBypassStaging(result: any, originalQuery?: string): boolean {
         if (!result) return true;
 
-        // Bypass if this was an introspection query
+        // Always bypass introspection queries
         if (originalQuery && this.isIntrospectionQuery(originalQuery)) {
             return true;
         }
 
-        // Bypass if GraphQL reported errors
+        // Always bypass if GraphQL reported errors
         if (result.errors) {
             return true;
         }
 
-        // Check if response contains introspection-like data structure
-        if (result.data) {
-            // Common introspection response patterns
-            if (result.data.__schema || result.data.__type) {
-                return true;
-            }
-            
-            // Check for schema metadata structures
-            const hasSchemaMetadata = Object.values(result.data).some((value: any) => {
-                if (value && typeof value === 'object') {
-                    // Look for typical schema introspection fields
-                    const keys = Object.keys(value);
-                    const schemaFields = ['types', 'queryType', 'mutationType', 'subscriptionType', 'directives'];
-                    const typeFields = ['name', 'kind', 'description', 'fields', 'interfaces', 'possibleTypes', 'enumValues', 'inputFields'];
-                    
-                    return schemaFields.some(field => keys.includes(field)) ||
-                           typeFields.filter(field => keys.includes(field)).length >= 2;
-                }
-                return false;
-            });
-            
-            if (hasSchemaMetadata) {
-                return true;
-            }
-        }
-
-        // Rough size check to avoid storing very small payloads
-        try {
-            if (JSON.stringify(result).length < 1500) {
-                return true;
-            }
-        } catch {
+        // Always bypass introspection response structures
+        if (result.data && (result.data.__schema || result.data.__type)) {
             return true;
         }
 
-        // Detect mostly empty data objects
-        if (result.data) {
-            const values = Object.values(result.data);
-            const hasContent = values.some((v) => {
-                if (v === null || v === undefined) return false;
-                if (Array.isArray(v)) return v.length > 0;
-                if (typeof v === "object") return Object.keys(v).length > 0;
-                return true;
-            });
-            if (!hasContent) return true;
+        // Simple rule: if it's a short response, bypass staging; if long, stage it
+        try {
+            const resultSize = JSON.stringify(result).length;
+            return resultSize < 500; // Bypass staging for responses under 500 characters
+        } catch {
+            return true; // Bypass if we can't serialize it
         }
-
-        return false;
     }
 
 	// ========================================
@@ -314,13 +428,51 @@ export class OpenTargetsMCP extends McpAgent {
 	// ERROR HANDLING - Reusable
 	// ========================================
 	private createErrorResponse(message: string, error: unknown) {
+		const errorString = error instanceof Error ? error.message : String(error);
+		
+		// Parse common GraphQL errors and provide helpful suggestions
+		let suggestions: string[] = [];
+		
+		if (errorString.includes("Unknown argument")) {
+			suggestions.push("❌ PARAMETER ERROR: This field doesn't accept the argument you provided.");
+			suggestions.push("💡 Use schema introspection to check valid arguments: { __type(name: \"Query\") { fields { name args { name type { name } } } } }");
+		}
+		
+		if (errorString.includes("Cannot query field")) {
+			suggestions.push("❌ FIELD ERROR: This field doesn't exist on this type.");
+			suggestions.push("💡 Check available fields with: { __type(name: \"YourTypeName\") { fields { name type { name } } } }");
+		}
+		
+		if (errorString.includes("is required but not provided")) {
+			suggestions.push("❌ MISSING REQUIRED PARAMETER: A required argument is missing.");
+			suggestions.push("💡 CORRECT PATTERNS:");
+			suggestions.push("  - target(ensemblId: \"ENSG00000169083\") { ... }");
+			suggestions.push("  - disease(efoId: \"EFO_0000270\") { ... }");
+			suggestions.push("  - search(queryString: \"cancer\", entityNames: [\"disease\"]) { ... }");
+		}
+		
+		if (errorString.includes("page") || errorString.includes("rows")) {
+			suggestions.push("❌ PAGINATION ERROR: Open Targets doesn't use standard pagination.");
+			suggestions.push("💡 CORRECT APPROACHES:");
+			suggestions.push("  - For search: search(queryString: \"...\") { hits { ... } }");
+			suggestions.push("  - For associations: associationsOnTheFly(...) { rows { ... } }");
+			suggestions.push("  - For specific entities: provide exact IDs");
+		}
+		
 		return {
 			content: [{
 				type: "text" as const,
 				text: JSON.stringify({
 					success: false,
 					error: message,
-					details: error instanceof Error ? error.message : String(error)
+					details: errorString,
+					...(suggestions.length > 0 && { helpful_suggestions: suggestions }),
+					quick_fixes: {
+						schema_check: "{ __type(name: \"Query\") { fields { name args { name type { name } } } } }",
+						search_example: "search(queryString: \"cancer\", entityNames: [\"disease\"]) { hits { id name } }",
+						target_example: "target(ensemblId: \"ENSG00000169083\") { id approvedSymbol approvedName }",
+						disease_example: "disease(efoId: \"EFO_0000270\") { id name }"
+					}
 				}, null, 2)
 			}]
 		};
