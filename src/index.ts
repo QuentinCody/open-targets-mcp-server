@@ -6,6 +6,87 @@ import { JsonToSqlDO } from "./do.js";
 // ========================================
 // API CONFIGURATION - Open Targets Platform
 // ========================================
+const GRAPHQL_TOOL_DESCRIPTION = [
+	"Run any Open Targets GraphQL query and optionally stage the response as normalized SQLite tables.",
+	"Typical flow: 1) run schema introspection or a data query, 2) if staging occurs you’ll receive a data_access_id for downstream SQL analysis.",
+	"Inputs: query (required), variables (optional JSON map). Responses under ~500 characters or introspection payloads are returned raw without staging.",
+	"Excellent for bespoke queries, schema discovery, or retrieving large result sets you plan to aggregate with SQL.",
+	"Returns JSON containing either raw GraphQL data or staging metadata with usage_instructions."
+].join("\n\n");
+
+const SQL_TOOL_DESCRIPTION = [
+	"Execute read-only SQL analytics against a staged Open Targets dataset.",
+	"Use after opentargets_graphql_query returns a data_access_id; supports SELECT, CTEs, PRAGMA, and EXPLAIN.",
+	"Inputs: data_access_id from the GraphQL tool, SQL string, optional positional params.",
+	"Great for summarising association scores, filtering targets by tractability, or joining staged tables.",
+	"Results include row_count, column_names, and automatically resolved chunked content."
+].join("\n\n");
+
+const TARGET_INFO_TOOL_DESCRIPTION = [
+	"Retrieve baseline identity details for a single target (gene/protein) by Ensembl ID.",
+	"Returns IDs, symbols, genomic location, synonyms, and protein references—ideal for grounding follow-up association or safety queries.",
+	"When to use: you already know the Ensembl ID and need authoritative metadata without manual GraphQL.",
+	"When not to use: you need to discover IDs first—use opentargets_graphql_query with search or the Open Targets website."
+].join("\n\n");
+
+const DISEASE_ASSOCIATED_TARGETS_DESCRIPTION = [
+	"List the highest scoring targets associated with a disease (EFO) including association scores and datatype breakdown.",
+	"Great for triaging target lists for a therapeutic area or preparing downstream evidence queries.",
+	"Parameters include optional pagination controls that map to the Open Targets association table.",
+	"Bypasses SQL staging and returns JSON directly for quick inspection."
+].join("\n\n");
+
+const GET_TARGET_INFO_QUERY = `
+	query GetTargetInfo($ensemblId: String!) {
+		target(ensemblId: $ensemblId) {
+			id
+			approvedSymbol
+			approvedName
+			biotype
+			functionDescriptions
+			synonyms {
+				label
+				source
+			}
+			genomicLocation {
+				chromosome
+				start
+				end
+				strand
+			}
+			proteinIds {
+				id
+				source
+			}
+		}
+	}
+`;
+
+const DISEASE_ASSOCIATED_TARGETS_QUERY = `
+	query DiseaseAssociatedTargets($efoId: String!, $pageIndex: Int!, $pageSize: Int!) {
+		disease(efoId: $efoId) {
+			id
+			name
+			associatedTargets(page: { index: $pageIndex, size: $pageSize }) {
+				count
+				rows {
+					target {
+						id
+						approvedSymbol
+						approvedName
+						biotype
+					}
+					score
+					datatypeScores {
+						id
+						score
+					}
+				}
+			}
+		}
+	}
+`;
+
 const API_CONFIG = {
 	name: "OpenTargetsExplorer",
 	version: "1.0.0",
@@ -22,99 +103,11 @@ const API_CONFIG = {
 	tools: {
 		graphql: {
 			name: "opentargets_graphql_query",
-			description: `Executes GraphQL queries against the Open Targets Platform API, processes responses into SQLite tables, and returns metadata for subsequent SQL querying.
-
-**Two-Phase Workflow:**
-1. **Data Staging**: This tool executes your GraphQL query and automatically converts the response into normalized SQLite tables
-2. **SQL Analysis**: Use the returned data_access_id with the SQL query tool to perform complex analytical queries
-
-**Open Targets Platform Overview:**
-The Open Targets Platform integrates evidence from genetics, genomics, transcriptomics, drugs, animal models and scientific literature to score and rank target-disease associations for drug discovery.
-
-**CRITICAL: GraphQL Best Practices:**
-- ALWAYS provide required parameters (check with introspection first)
-- Use exact field names from the schema (case-sensitive)
-- Use schema introspection to discover available fields and arguments
-
-**Key API Entities & Required Parameters:**
-- **target(ensemblId: String!)**: Single target by Ensembl ID (REQUIRED)
-- **targets(ensemblIds: [String!]!)**: Multiple targets (REQUIRED ensemblIds array)
-- **disease(efoId: String!)**: Single disease by EFO ID (REQUIRED)
-- **diseases(efoIds: [String!]!)**: Multiple diseases (REQUIRED efoIds array)
-- **drug(chemblId: String!)**: Single drug by ChEMBL ID (REQUIRED)
-- **drugs(chemblIds: [String!]!)**: Multiple drugs (REQUIRED chemblIds array)
-- **search(queryString: String!, entityNames: [String!])**: General search
-
-**Correct Query Examples:**
-\`\`\`graphql
-# Single target query (CORRECT)
-query GetTarget {
-  target(ensemblId: "ENSG00000169083") {
-    id
-    approvedSymbol
-    approvedName
-    biotype
-  }
-}
-
-# Multiple targets query (CORRECT)
-query GetTargets {
-  targets(ensemblIds: ["ENSG00000169083", "ENSG00000146648"]) {
-    id
-    approvedSymbol
-    approvedName
-  }
-}
-
-# Search for diseases (CORRECT)
-query SearchDiseases {
-  search(queryString: "cancer", entityNames: ["disease"]) {
-    hits {
-      id
-      name
-      category
-    }
-  }
-}
-
-# Target-disease associations (CORRECT)
-query GetTargetDiseases {
-  target(ensemblId: "ENSG00000169083") {
-    id
-    approvedSymbol
-    associatedDiseases {
-      count
-      rows {
-        disease { id name }
-        score
-      }
-    }
-  }
-}
-\`\`\`
-
-**Schema Introspection (Recommended First):**
-Always start with introspection to understand available fields:
-\`\`\`graphql
-{
-  __type(name: "Query") {
-    fields {
-      name
-      description
-      args {
-        name
-        type { name kind ofType { name } }
-      }
-    }
-  }
-}
-\`\`\`
-
-Returns a data_access_id for subsequent SQL querying of the staged data.`
+			description: GRAPHQL_TOOL_DESCRIPTION
 		},
 		sql: {
 			name: "opentargets_query_sql", 
-			description: "Execute read-only SQL queries against staged Open Targets data. Use the data_access_id from opentargets_graphql_query to query the SQLite tables created from GraphQL responses."
+			description: SQL_TOOL_DESCRIPTION
 		}
 	}
 };
@@ -223,6 +216,66 @@ export class OpenTargetsMCP extends McpAgent {
 					return { content: [{ type: "text" as const, text: JSON.stringify(queryResult, null, 2) }] };
 				} catch (error) {
 					return this.createErrorResponse("SQL execution failed", error);
+				}
+			}
+		);
+
+		// Tool #3: Direct target identity lookup (no staging)
+		this.server.tool(
+			"get_target_info",
+			TARGET_INFO_TOOL_DESCRIPTION,
+			{
+				ensembl_id: z
+					.string()
+					.min(3)
+					.describe("Ensembl target ID such as \"ENSG00000157764\"")
+			},
+			async ({ ensembl_id }) => {
+				try {
+					const result = await this.executeGraphQLQuery(GET_TARGET_INFO_QUERY, { ensemblId: ensembl_id });
+					const data = result.data ?? result;
+					return this.createJsonResponse(data);
+				} catch (error) {
+					return this.createErrorResponse("get_target_info failed", error);
+				}
+			}
+		);
+
+		// Tool #4: Disease-associated targets (no staging)
+		this.server.tool(
+			"get_disease_associated_targets",
+			DISEASE_ASSOCIATED_TARGETS_DESCRIPTION,
+			{
+				efo_id: z
+					.string()
+					.min(3)
+					.describe("Disease EFO identifier such as \"EFO_0000270\""),
+				page_index: z
+					.number()
+					.int()
+					.min(0)
+					.default(0)
+					.describe("Zero-based page index (default 0)"),
+				page_size: z
+					.number()
+					.int()
+					.min(1)
+					.max(50)
+					.default(10)
+					.describe("Number of rows per page (default 10, max 50)")
+			},
+			async ({ efo_id, page_index, page_size }) => {
+				try {
+					const variables = {
+						efoId: efo_id,
+						pageIndex: page_index ?? 0,
+						pageSize: page_size ?? 10
+					};
+					const result = await this.executeGraphQLQuery(DISEASE_ASSOCIATED_TARGETS_QUERY, variables);
+					const data = result.data ?? result;
+					return this.createJsonResponse(data);
+				} catch (error) {
+					return this.createErrorResponse("get_disease_associated_targets failed", error);
 				}
 			}
 		);
@@ -410,7 +463,7 @@ export class OpenTargetsMCP extends McpAgent {
 		return await response.json();
 	}
 
-    private async deleteDataset(dataAccessId: string): Promise<boolean> {
+	private async deleteDataset(dataAccessId: string): Promise<boolean> {
         const env = this.env as OpenTargetsEnv;
         if (!env?.JSON_TO_SQL_DO) {
             throw new Error("JSON_TO_SQL_DO binding not available");
@@ -422,7 +475,18 @@ export class OpenTargetsMCP extends McpAgent {
         const response = await stub.fetch("http://do/delete", { method: 'DELETE' });
 
         return response.ok;
-    }
+	}
+
+	private createJsonResponse(payload: unknown) {
+		return {
+			content: [
+				{
+					type: "text" as const,
+					text: JSON.stringify(payload, null, 2)
+				}
+			]
+		};
+	}
 
 	// ========================================
 	// ERROR HANDLING - Reusable

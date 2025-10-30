@@ -244,56 +244,57 @@ export class DataInsertionEngine {
 			if (columnName === 'id' && schema.columns[columnName].includes('AUTOINCREMENT')) {
 				continue;
 			}
-			
-			let value = null;
-			
-			// Handle foreign key columns
-			if (columnName.endsWith('_id') && !columnName.includes('_json')) {
-				const baseKey = columnName.slice(0, -3);
-				const originalKey = this.findOriginalKey(obj, baseKey);
-				if (originalKey && obj[originalKey] && typeof obj[originalKey] === 'object') {
-					value = (obj[originalKey] as any).id || null;
-				}
-			}
-			// Handle prefixed columns (from nested scalar fields)
-			else if (columnName.includes('_') && !columnName.endsWith('_json')) {
-				const parts = columnName.split('_');
-				if (parts.length >= 2) {
-					const baseKey = parts[0];
-					const subKey = parts.slice(1).join('_');
-					const originalKey = this.findOriginalKey(obj, baseKey);
-					if (originalKey && obj[originalKey] && typeof obj[originalKey] === 'object') {
-						const nestedObj = obj[originalKey];
-						const originalSubKey = this.findOriginalKey(nestedObj, subKey);
-						if (originalSubKey && nestedObj[originalSubKey] !== undefined) {
-							value = nestedObj[originalSubKey];
-							if (typeof value === 'boolean') value = value ? 1 : 0;
-						}
-					}
-				}
-			}
-			// Handle JSON columns with chunking
-			else if (columnName.endsWith('_json')) {
+
+			let value: any = null;
+
+			// JSON payload columns get first priority so we keep chunking behaviour
+			if (columnName.endsWith('_json')) {
 				const baseKey = columnName.slice(0, -5);
 				const originalKey = this.findOriginalKey(obj, baseKey);
 				if (originalKey && obj[originalKey] && typeof obj[originalKey] === 'object') {
 					value = await this.chunkingEngine.smartJsonStringify(obj[originalKey], sql);
 				}
-			}
-			// Handle regular columns
-			else {
-				const originalKey = this.findOriginalKey(obj, columnName);
-				if (originalKey && obj[originalKey] !== undefined) {
-					value = obj[originalKey];
-					if (typeof value === 'boolean') value = value ? 1 : 0;
-					
-					// Skip arrays of entities (they're handled via junction tables)
+			} else {
+				// Direct property match (covers simple camelCase -> snake_case conversions)
+				const directKey = this.findOriginalKey(obj, columnName);
+				if (directKey && obj[directKey] !== undefined) {
+					value = obj[directKey];
 					if (Array.isArray(value) && value.length > 0 && this.isEntity(value[0])) {
-						continue;
+						value = null; // handled through relationship tables
+					} else if (typeof value === 'boolean') {
+						value = value ? 1 : 0;
+					}
+				}
+
+				// Foreign-key columns (e.g., target_id) fall back to the nested object's id
+				if ((value === null || value === undefined) && columnName.endsWith('_id')) {
+					const baseKey = columnName.slice(0, -3);
+					const originalKey = this.findOriginalKey(obj, baseKey);
+					if (originalKey && obj[originalKey] && typeof obj[originalKey] === 'object') {
+						value = (obj[originalKey] as any).id ?? null;
+					}
+				}
+
+				// Prefixed columns from flattened nested scalars (e.g., associated_diseases_count)
+				if ((value === null || value === undefined) && columnName.includes('_')) {
+					const parts = columnName.split('_');
+					for (let i = parts.length - 1; i > 0; i--) {
+						const baseCandidate = parts.slice(0, i).join('_');
+						const subCandidate = parts.slice(i).join('_');
+						const originalBaseKey = this.findOriginalKey(obj, baseCandidate);
+						if (originalBaseKey && obj[originalBaseKey] && typeof obj[originalBaseKey] === 'object') {
+							const nestedObj = obj[originalBaseKey];
+							const originalSubKey = this.findOriginalKey(nestedObj, subCandidate);
+							if (originalSubKey && nestedObj[originalSubKey] !== undefined) {
+								value = nestedObj[originalSubKey];
+								if (typeof value === 'boolean') value = value ? 1 : 0;
+								break;
+							}
+						}
 					}
 				}
 			}
-			
+
 			if (value !== null && value !== undefined) {
 				rowData[columnName] = value;
 			}
