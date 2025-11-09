@@ -133,6 +133,12 @@ export class OpenTargetsMCP extends McpAgent {
 		name: API_CONFIG.name,
 		version: API_CONFIG.version,
 		description: API_CONFIG.description
+	}, {
+		capabilities: {
+			tools: {
+				listChanged: true
+			}
+		}
 	});
 
 	async init() {
@@ -437,18 +443,24 @@ export class OpenTargetsMCP extends McpAgent {
             data_access_id: accessId,
             processing_details: processingResult
         };
-    }
-
-    private async executeSQLQuery(dataAccessId: string, sql: string): Promise<any> {
-		const env = this.env as OpenTargetsEnv;
-		if (!env?.JSON_TO_SQL_DO) {
-			throw new Error("JSON_TO_SQL_DO binding not available");
 		}
-		
-		const doId = env.JSON_TO_SQL_DO.idFromName(dataAccessId);
-		const stub = env.JSON_TO_SQL_DO.get(doId);
-		
-		// Use enhanced SQL execution that automatically resolves chunked content
+
+	    private async executeSQLQuery(dataAccessId: string, sql: string): Promise<any> {
+			const env = this.env as OpenTargetsEnv;
+			if (!env?.JSON_TO_SQL_DO) {
+				throw new Error("JSON_TO_SQL_DO binding not available");
+			}
+
+			if (!datasetRegistry.has(dataAccessId)) {
+				throw new Error(
+					`Unknown data_access_id "${dataAccessId}". Run opentargets_graphql_query first or verify the ID.`
+				);
+			}
+			
+			const doId = env.JSON_TO_SQL_DO.idFromName(dataAccessId);
+			const stub = env.JSON_TO_SQL_DO.get(doId);
+			
+			// Use enhanced SQL execution that automatically resolves chunked content
 		const response = await stub.fetch("http://do/query-enhanced", {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
