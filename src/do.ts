@@ -69,7 +69,7 @@ export class JsonToSqlDO extends DurableObject {
 				results,
 				row_count: results.length,
 				column_names: result.columnNames || [],
-				query_type: validationResult.queryType
+
 			};
 
 		} catch (error) {
@@ -99,8 +99,6 @@ export class JsonToSqlDO extends DurableObject {
 			return {
 				...result,
 				results: enhancedResults,
-				chunked_content_resolved: enhancedResults.length !== result.results.length || 
-					JSON.stringify(enhancedResults) !== JSON.stringify(result.results)
 			};
 
 		} catch (error) {
@@ -391,19 +389,14 @@ export class JsonToSqlDO extends DurableObject {
 				const countRow = countResult.one();
 				const rowCount = typeof countRow?.count === 'number' ? countRow.count : 0;
 
-				const sampleResult = this.ctx.storage.sql.exec(`SELECT * FROM ${tableName} LIMIT 3`);
-				const sampleData = sampleResult.toArray();
-
 				metadata.schemas![tableName] = {
-					columns: schema.columns,
-					row_count: rowCount,
-					sample_data: sampleData
+					columns: Object.keys(schema.columns),
+					row_count: rowCount
 				};
 
 				metadata.total_rows! += rowCount;
 
 			} catch (error) {
-				// Continue with other tables on error
 				continue;
 			}
 		}
@@ -442,9 +435,6 @@ export class JsonToSqlDO extends DurableObject {
 					const countResult = this.ctx.storage.sql.exec(`SELECT COUNT(*) as count FROM ${tableName}`).one();
 					const rowCount = typeof countResult?.count === 'number' ? countResult.count : 0;
 					
-					// Get sample data (first 3 rows)
-					const sampleData = this.ctx.storage.sql.exec(`SELECT * FROM ${tableName} LIMIT 3`).toArray();
-					
 					// Get foreign key information
 					const foreignKeys = this.ctx.storage.sql.exec(`PRAGMA foreign_key_list(${tableName})`).toArray();
 					
@@ -470,7 +460,6 @@ export class JsonToSqlDO extends DurableObject {
 							name: String(idx.name),
 							unique: Boolean(idx.unique)
 						})),
-						sample_data: sampleData
 					};
 				} catch (tableError) {
 					// Skip this table if there's an error processing it

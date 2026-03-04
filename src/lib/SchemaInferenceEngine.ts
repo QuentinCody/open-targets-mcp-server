@@ -104,38 +104,38 @@ export class SchemaInferenceEngine {
 		}
 	}
 	
-	private processEntityProperties(entity: any, entityType: string): void {
+	private processEntityProperties(entity: any, entityType: string, basePath: string[] = []): void {
 		for (const [key, value] of Object.entries(entity)) {
+			const fieldPath = [...basePath, key];
 			if (Array.isArray(value) && value.length > 0) {
-				// Check if this array contains entities
 				const firstItem = value.find(item => this.isEntity(item));
 				if (firstItem) {
-					const relatedEntityType = this.inferEntityType(firstItem, [key]);
+					const relatedEntityType = this.inferEntityType(firstItem, fieldPath);
 					this.recordRelationship(entityType, relatedEntityType);
-					
-					// Process all entities in this array
+
 					value.forEach(item => {
 						if (this.isEntity(item)) {
 							const entitiesOfType = this.discoveredEntities.get(relatedEntityType) || [];
 							entitiesOfType.push(item);
 							this.discoveredEntities.set(relatedEntityType, entitiesOfType);
-							
-							// Recursively process nested entities
 							this.processEntityProperties(item, relatedEntityType);
 						}
 					});
 				}
-			} else if (value && typeof value === 'object' && this.isEntity(value)) {
-				// Single related entity
-				const relatedEntityType = this.inferEntityType(value, [key]);
-				this.recordRelationship(entityType, relatedEntityType);
-				
-				const entitiesOfType = this.discoveredEntities.get(relatedEntityType) || [];
-				entitiesOfType.push(value);
-				this.discoveredEntities.set(relatedEntityType, entitiesOfType);
-				
-				// Recursively process nested entities
-				this.processEntityProperties(value, relatedEntityType);
+			} else if (value && typeof value === 'object' && !Array.isArray(value)) {
+				if (this.isEntity(value)) {
+					const relatedEntityType = this.inferEntityType(value, fieldPath);
+					// 1:1 relationships use direct FK columns (e.g., target_id) — no junction table needed.
+					// Only array relationships (many-to-many) get junction tables.
+
+					const entitiesOfType = this.discoveredEntities.get(relatedEntityType) || [];
+					entitiesOfType.push(value);
+					this.discoveredEntities.set(relatedEntityType, entitiesOfType);
+					this.processEntityProperties(value, relatedEntityType);
+				} else {
+					// Non-entity wrapper (e.g., {count, rows}) — explore for nested entities
+					this.processEntityProperties(value, entityType, fieldPath);
+				}
 			}
 		}
 	}
@@ -308,26 +308,40 @@ export class SchemaInferenceEngine {
 	
 	private createJunctionTableSchemas(schemas: Record<string, TableSchema>): void {
 		const junctionTables = new Set<string>();
-		
+
 		for (const [fromTable, relatedTables] of this.entityRelationships.entries()) {
 			for (const toTable of relatedTables) {
 				// Create a consistent junction table name (alphabetical order to avoid duplicates)
-				const junctionName = [fromTable, toTable].sort().join('_');
-				
+				const [sortedA, sortedB] = [fromTable, toTable].sort();
+				const junctionName = `${sortedA}_${sortedB}`;
+
 				if (!junctionTables.has(junctionName)) {
 					junctionTables.add(junctionName);
-					
+
+					// Match FK type to the referenced entity's PK type
+					const aIdType = this.getEntityIdType(sortedA, schemas);
+					const bIdType = this.getEntityIdType(sortedB, schemas);
+
 					schemas[junctionName] = {
 						columns: {
 							id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
-							[`${fromTable}_id`]: 'INTEGER',
-							[`${toTable}_id`]: 'INTEGER'
+							[`${sortedA}_id`]: aIdType,
+							[`${sortedB}_id`]: bIdType
 						},
 						sample_data: []
 					};
 				}
 			}
 		}
+	}
+
+	private getEntityIdType(entityType: string, schemas: Record<string, TableSchema>): string {
+		const schema = schemas[entityType];
+		if (!schema) return 'INTEGER';
+		const idCol = schema.columns.id;
+		// If the entity table has TEXT or string-based PK, use TEXT for the FK
+		if (idCol && (idCol === 'TEXT' || idCol === 'TEXT PRIMARY KEY')) return 'TEXT';
+		return 'INTEGER';
 	}
 	
 	private createSchemaFromPrimitiveOrSimpleArray(data: any, tableName: string): TableSchema {
@@ -421,6 +435,8 @@ export class SchemaInferenceEngine {
 			columns.id = "INTEGER PRIMARY KEY AUTOINCREMENT";
 		} else if (columns.id === "INTEGER") {
 			columns.id = "INTEGER PRIMARY KEY";
+		} else if (columns.id === "TEXT") {
+			columns.id = "TEXT PRIMARY KEY";
 		}
 	}
 	

@@ -5,7 +5,7 @@ import { SchemaParser, FieldExtractionRule } from "./SchemaParser.js";
 export class DataInsertionEngine {
 	private chunkingEngine = new ChunkingEngine();
 	private schemaParser = new SchemaParser();
-	private processedEntities: Map<string, Map<any, number>> = new Map();
+	private processedEntities: Map<string, Map<any, number | string>> = new Map();
 	private relationshipData: Map<string, Set<string>> = new Map(); // Track actual relationships found in data
 	private extractionRules: FieldExtractionRule[] = [];
 	
@@ -63,173 +63,128 @@ export class DataInsertionEngine {
 
 	private async insertAllEntities(obj: any, schemas: Record<string, TableSchema>, sql: any, path: string[] = []): Promise<void> {
 		if (!obj || typeof obj !== 'object') return;
-		
-		// Handle arrays of entities
+
 		if (Array.isArray(obj)) {
 			for (const item of obj) {
 				await this.insertAllEntities(item, schemas, sql, path);
 			}
 			return;
 		}
-		
-		// Handle GraphQL edges pattern
-		if (obj.edges && Array.isArray(obj.edges)) {
-			const nodes = obj.edges.map((edge: any) => edge.node).filter(Boolean);
-			for (const node of nodes) {
-				await this.insertAllEntities(node, schemas, sql, path);
+
+		// Children first: process all nested values before this entity.
+		// This ensures child entities (target, drug) are in processedEntities
+		// before their parent tries to resolve foreign keys.
+		for (const [key, value] of Object.entries(obj)) {
+			if (value && typeof value === 'object') {
+				await this.insertAllEntities(value, schemas, sql, [...path, key]);
 			}
-			return;
 		}
-		
-		// Handle GraphQL rows pattern (Open Targets uses this)
-		if (obj.rows && Array.isArray(obj.rows)) {
-			for (const row of obj.rows) {
-				await this.insertAllEntities(row, schemas, sql, path);
-			}
-			return;
-		}
-		
-		// Handle individual entities
+
+		// Then insert this entity (nested entities are now available for FK resolution)
 		if (this.isEntity(obj)) {
 			const entityType = this.inferEntityType(obj, path);
 			if (schemas[entityType]) {
-				await this.insertEntityRecord(obj, entityType, schemas[entityType], sql);
-				
-				// Process nested entities and record relationships
-				await this.processEntityRelationships(obj, entityType, schemas, sql, path);
+				const entityId = await this.insertEntityRecord(obj, entityType, schemas[entityType], sql);
+				if (entityId !== null) {
+					this.trackEntityRelationships(obj, entityType, entityId, schemas);
+				}
 			}
 		}
-		
-		// Recursively explore nested objects
-		for (const [key, value] of Object.entries(obj)) {
-			await this.insertAllEntities(value, schemas, sql, [...path, key]);
-		}
 	}
-	
-	private async processEntityRelationships(entity: any, entityType: string, schemas: Record<string, TableSchema>, sql: any, path: string[]): Promise<void> {
+
+	private trackEntityRelationships(entity: any, entityType: string, entityId: number | string, schemas: Record<string, TableSchema>): void {
 		for (const [key, value] of Object.entries(entity)) {
+			// Unwrap {nodes: [...]}, {edges: [{node: ...}]}, or {rows: [...]} wrappers, or use array directly
+			let items: any[] | null = null;
 			if (Array.isArray(value) && value.length > 0) {
-				// Check if this array contains entities using schema information
-				const extractionInfo = this.shouldExtractEntitiesFromField(entityType, key);
-				
-				if (extractionInfo.extract && value.length > 0 && this.isEntity(value[0])) {
-					const relatedEntityType = extractionInfo.targetType || this.inferEntityType(value[0], [key]);
-					
-					// Process all entities in this array and record relationships
-					for (const item of value) {
-						if (this.isEntity(item) && schemas[relatedEntityType]) {
-							await this.insertEntityRecord(item, relatedEntityType, schemas[relatedEntityType], sql);
-							
-							// Track this relationship for junction table creation
-							const relationshipKey = [entityType, relatedEntityType].sort().join('_');
-							const relationships = this.relationshipData.get(relationshipKey) || new Set();
-							const entityId = this.getEntityId(entity, entityType);
-							const relatedId = this.getEntityId(item, relatedEntityType);
-							
-							if (entityId && relatedId) {
-								relationships.add(`${entityId}_${relatedId}`);
-								this.relationshipData.set(relationshipKey, relationships);
-							}
-							
-							// Recursively process nested entities
-							await this.processEntityRelationships(item, relatedEntityType, schemas, sql, [...path, key]);
-						}
-					}
-				} else {
-					// Fallback to original logic for non-schema-guided extraction
-					const firstItem = value.find(item => this.isEntity(item));
-					if (firstItem) {
-						const relatedEntityType = this.inferEntityType(firstItem, [key]);
-						
-						// Process all entities in this array and record relationships
-						for (const item of value) {
-							if (this.isEntity(item) && schemas[relatedEntityType]) {
-								await this.insertEntityRecord(item, relatedEntityType, schemas[relatedEntityType], sql);
-								
-								// Track this relationship for junction table creation
-								const relationshipKey = [entityType, relatedEntityType].sort().join('_');
-								const relationships = this.relationshipData.get(relationshipKey) || new Set();
-								const entityId = this.getEntityId(entity, entityType);
-								const relatedId = this.getEntityId(item, relatedEntityType);
-								
-								if (entityId && relatedId) {
-									relationships.add(`${entityId}_${relatedId}`);
-									this.relationshipData.set(relationshipKey, relationships);
-								}
-								
-								// Recursively process nested entities
-								await this.processEntityRelationships(item, relatedEntityType, schemas, sql, [...path, key]);
-							}
-						}
-					}
-				}
-			} else if (value && typeof value === 'object' && this.isEntity(value)) {
-				// Single related entity
-				const relatedEntityType = this.inferEntityType(value, [key]);
-				if (schemas[relatedEntityType]) {
-					await this.insertEntityRecord(value, relatedEntityType, schemas[relatedEntityType], sql);
-					await this.processEntityRelationships(value, relatedEntityType, schemas, sql, [...path, key]);
+				items = value;
+			} else if (value && typeof value === 'object' && !Array.isArray(value)) {
+				const wrapper = value as Record<string, any>;
+				if (wrapper.nodes && Array.isArray(wrapper.nodes)) {
+					items = wrapper.nodes;
+				} else if (wrapper.edges && Array.isArray(wrapper.edges)) {
+					items = wrapper.edges.map((e: any) => e.node).filter(Boolean);
+				} else if (wrapper.rows && Array.isArray(wrapper.rows)) {
+					items = wrapper.rows;
 				}
 			}
+			// 1:1 nested entities (single objects) use direct FK columns — no junction table needed.
+			if (!items || items.length === 0) continue;
+
+			const firstItem = items.find(item => this.isEntity(item));
+			if (!firstItem) continue;
+
+			const relatedType = this.inferEntityType(firstItem, [key]);
+			const junctionName = [entityType, relatedType].sort().join('_');
+			if (!schemas[junctionName]) continue;
+
+			const pairs = this.relationshipData.get(junctionName) || new Set<string>();
+			for (const item of items) {
+				if (!this.isEntity(item)) continue;
+				const relatedId = this.getEntityId(item, relatedType);
+				if (relatedId !== null) {
+					const [sortedType1] = [entityType, relatedType].sort();
+					const id1 = sortedType1 === entityType ? entityId : relatedId;
+					const id2 = sortedType1 === entityType ? relatedId : entityId;
+					pairs.add(`${id1}::${id2}`);
+				}
+			}
+			this.relationshipData.set(junctionName, pairs);
 		}
 	}
 	
-	private async insertEntityRecord(entity: any, tableName: string, schema: TableSchema, sql: any): Promise<number | null> {
-		// Check if this entity was already processed
+	private async insertEntityRecord(entity: any, tableName: string, schema: TableSchema, sql: any): Promise<number | string | null> {
 		const entityMap = this.processedEntities.get(tableName) || new Map();
 		if (entityMap.has(entity)) {
 			return entityMap.get(entity)!;
 		}
-		
+
 		const rowData = await this.mapEntityToSchema(entity, schema, sql);
 		if (Object.keys(rowData).length === 0) return null;
-		
+
 		const columns = Object.keys(rowData);
 		const placeholders = columns.map(() => '?').join(', ');
 		const values = Object.values(rowData);
-		
-		// Use INSERT OR IGNORE to handle potential duplicates
-		const insertSQL = `INSERT OR IGNORE INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders})`;
-		sql.exec(insertSQL, ...values);
-		
-		// Get the inserted or existing ID
-		let insertedId: number | null = null;
-		if (rowData.id) {
-			// If we have the ID in the data, use it
-			insertedId = rowData.id;
+
+		let insertedId: number | string | null = null;
+
+		if (entity.id && (typeof entity.id === 'string' || typeof entity.id === 'number')) {
+			// Preserve the entity's own ID (string or number) for accurate FK references
+			insertedId = entity.id;
+			sql.exec(`INSERT OR REPLACE INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders})`, ...values);
 		} else {
-			// Otherwise get the last inserted row ID
-			insertedId = sql.exec(`SELECT last_insert_rowid() as id`).one()?.id || null;
+			sql.exec(`INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders})`, ...values);
+			try {
+				insertedId = sql.exec(`SELECT last_insert_rowid() as lid`).toArray()[0]?.lid ?? null;
+			} catch { insertedId = null; }
 		}
-		
-		// Track this entity
-		if (insertedId) {
+
+		if (insertedId !== null) {
 			entityMap.set(entity, insertedId);
 			this.processedEntities.set(tableName, entityMap);
 		}
-		
+
 		return insertedId;
 	}
 	
 	private async insertJunctionTableRecords(data: any, schemas: Record<string, TableSchema>, sql: any): Promise<void> {
-		// Only create junction table records for relationships that actually have data
-		for (const [relationshipKey, relationshipPairs] of this.relationshipData.entries()) {
-			if (schemas[relationshipKey]) {
-				const [table1, table2] = relationshipKey.split('_');
-				
-				for (const pairKey of relationshipPairs) {
-					const [id1, id2] = pairKey.split('_').map(Number);
-					
-					const insertSQL = `INSERT OR IGNORE INTO ${relationshipKey} (${table1}_id, ${table2}_id) VALUES (?, ?)`;
-					sql.exec(insertSQL, id1, id2);
-				}
+		for (const [junctionName, pairs] of this.relationshipData.entries()) {
+			if (!schemas[junctionName]) continue;
+			const columns = Object.keys(schemas[junctionName].columns).filter(c => c.endsWith('_id'));
+			if (columns.length < 2) continue;
+
+			for (const pairKey of pairs) {
+				const [id1Str, id2Str] = pairKey.split('::');
+				const id1 = isNaN(Number(id1Str)) ? id1Str : Number(id1Str);
+				const id2 = isNaN(Number(id2Str)) ? id2Str : Number(id2Str);
+				sql.exec(`INSERT OR IGNORE INTO ${junctionName} (${columns[0]}, ${columns[1]}) VALUES (?, ?)`, id1, id2);
 			}
 		}
 	}
 	
-	private getEntityId(entity: any, entityType: string): number | null {
+	private getEntityId(entity: any, entityType: string): number | string | null {
 		const entityMap = this.processedEntities.get(entityType);
-		return entityMap?.get(entity) || null;
+		return entityMap?.get(entity) ?? null;
 	}
 	
 	private async mapEntityToSchema(obj: any, schema: TableSchema, sql: any): Promise<any> {
@@ -266,12 +221,24 @@ export class DataInsertionEngine {
 					}
 				}
 
-				// Foreign-key columns (e.g., target_id) fall back to the nested object's id
+				// Foreign-key columns — prefer entity's own id for natural JOINs
 				if ((value === null || value === undefined) && columnName.endsWith('_id')) {
 					const baseKey = columnName.slice(0, -3);
 					const originalKey = this.findOriginalKey(obj, baseKey);
 					if (originalKey && obj[originalKey] && typeof obj[originalKey] === 'object') {
-						value = (obj[originalKey] as any).id ?? null;
+						const nestedEntity = obj[originalKey];
+						// Use entity's own id if it has one (e.g., target.id = "ENSG...")
+						if (nestedEntity.id !== undefined) {
+							value = nestedEntity.id;
+						} else {
+							// No natural id — look up DB-assigned rowid
+							for (const [, entityMap] of this.processedEntities.entries()) {
+								if (entityMap.has(nestedEntity)) {
+									value = entityMap.get(nestedEntity)!;
+									break;
+								}
+							}
+						}
 					}
 				}
 
@@ -321,31 +288,44 @@ export class DataInsertionEngine {
 	}
 	
 	private inferEntityType(obj: any, path: string[]): string {
-		// Try to infer type from object properties (e.g., __typename)
+		// Must match SchemaInferenceEngine.inferEntityType exactly for junction table consistency
 		if (obj.__typename) return this.sanitizeTableName(obj.__typename);
-		if (obj.type && typeof obj.type === 'string') return this.sanitizeTableName(obj.type);
-		
+		if (obj.type && typeof obj.type === 'string' && !['edges', 'node'].includes(obj.type.toLowerCase())) {
+			return this.sanitizeTableName(obj.type);
+		}
+
 		// Special Open Targets patterns
 		if (obj.ensemblId) return 'target';
 		if (obj.efoId) return 'disease';
 		if (obj.chemblId) return 'drug';
 		if (obj.approvedSymbol) return 'target';
-		
-		// Infer from path context, attempting to singularize
+
 		if (path.length > 0) {
-			const lastPath = path[path.length - 1];
-			if (lastPath === 'edges' && path.length > 1) {
-				return this.sanitizeTableName(path[path.length - 2]);
+			let lastName = path[path.length - 1];
+
+			// Resolve GraphQL wrapper patterns to the meaningful parent name
+			if ((lastName === 'node' || lastName === 'nodes') && path.length > 1) {
+				lastName = path[path.length - 2];
+				if (lastName === 'edges' && path.length > 2) {
+					lastName = path[path.length - 3];
+				}
+			} else if (lastName === 'edges' && path.length > 1) {
+				lastName = path[path.length - 2];
+			} else if (lastName === 'rows' && path.length > 1) {
+				lastName = path[path.length - 2];
 			}
-			if (lastPath === 'rows' && path.length > 1) {
-				return this.sanitizeTableName(path[path.length - 2]);
+
+			// Singularize (matches SchemaInferenceEngine logic)
+			const sanitized = this.sanitizeTableName(lastName);
+			if (sanitized.endsWith('ies')) {
+				return sanitized.slice(0, -3) + 'y';
+			} else if (sanitized.endsWith('s') && !sanitized.endsWith('ss') && sanitized.length > 1) {
+				const singular = sanitized.slice(0, -1);
+				if (singular.length > 1) return singular;
 			}
-			if (lastPath.endsWith('s') && lastPath.length > 1) {
-				return this.sanitizeTableName(lastPath.slice(0, -1));
-			}
-			return this.sanitizeTableName(lastPath);
+			return sanitized;
 		}
-		
+
 		return 'entity_' + Math.random().toString(36).substr(2, 9);
 	}
 	

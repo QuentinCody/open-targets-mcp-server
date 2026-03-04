@@ -168,7 +168,7 @@ export class OpenTargetsMCP extends McpAgent {
                                         "For search": "search(queryString: \"cancer\", entityNames: [\"disease\"]) { hits { id name } }",
                                         "Schema introspection": "{ __type(name: \"Query\") { fields { name args { name type { name } } } } }"
                                     }
-                                }, null, 2)
+                                })
                             }]
                         };
                     }
@@ -179,7 +179,7 @@ export class OpenTargetsMCP extends McpAgent {
                         return {
                             content: [{
                                 type: "text" as const,
-                                text: JSON.stringify(graphqlResult, null, 2)
+                                text: JSON.stringify(graphqlResult)
                             }]
                         };
                     }
@@ -188,16 +188,7 @@ export class OpenTargetsMCP extends McpAgent {
                     return {
                         content: [{
                             type: "text" as const,
-                            text: JSON.stringify({
-                                ...stagingResult,
-                                usage_instructions: [
-                                    `Use data_access_id="${stagingResult.data_access_id}" with the opentargets_query_sql tool to analyze the staged data`,
-                                    "Example queries for Open Targets data:",
-                                    "- Targets with high tractability: SELECT * FROM target WHERE json_extract(tractability_json, '$.score') > 0.8",
-                                    "- Disease associations: SELECT * FROM disease_target_association ORDER BY score DESC LIMIT 10",
-                                    "- Drug mechanisms: SELECT name, json_extract(mechanisms_json, '$[*].mechanismOfAction') FROM drug"
-                                ]
-                            }, null, 2)
+                            text: JSON.stringify(stagingResult)
                         }]
                     };
 
@@ -219,7 +210,7 @@ export class OpenTargetsMCP extends McpAgent {
 			async ({ data_access_id, sql }) => {
 				try {
 					const queryResult = await this.executeSQLQuery(data_access_id, sql);
-					return { content: [{ type: "text" as const, text: JSON.stringify(queryResult, null, 2) }] };
+					return { content: [{ type: "text" as const, text: JSON.stringify(queryResult) }] };
 				} catch (error) {
 					return this.createErrorResponse("SQL execution failed", error);
 				}
@@ -451,12 +442,9 @@ export class OpenTargetsMCP extends McpAgent {
 				throw new Error("JSON_TO_SQL_DO binding not available");
 			}
 
-			if (!datasetRegistry.has(dataAccessId)) {
-				throw new Error(
-					`Unknown data_access_id "${dataAccessId}". Run opentargets_graphql_query first or verify the ID.`
-				);
-			}
-			
+			// Note: datasetRegistry is advisory only (in-memory, lost on cold start).
+			// The DO itself will error if no data exists, so we don't gate on the registry.
+
 			const doId = env.JSON_TO_SQL_DO.idFromName(dataAccessId);
 			const stub = env.JSON_TO_SQL_DO.get(doId);
 			
@@ -494,7 +482,7 @@ export class OpenTargetsMCP extends McpAgent {
 			content: [
 				{
 					type: "text" as const,
-					text: JSON.stringify(payload, null, 2)
+					text: JSON.stringify(payload)
 				}
 			]
 		};
@@ -549,7 +537,7 @@ export class OpenTargetsMCP extends McpAgent {
 						target_example: "target(ensemblId: \"ENSG00000169083\") { id approvedSymbol approvedName }",
 						disease_example: "disease(efoId: \"EFO_0000270\") { id name }"
 					}
-				}, null, 2)
+				})
 			}]
 		};
 	}
@@ -578,7 +566,7 @@ export default {
             const protocolVersion = request.headers.get("MCP-Protocol-Version");
             
             // @ts-ignore - Streamable HTTP transport handling
-            const response = await OpenTargetsMCP.serve("/mcp").fetch(request, env, ctx);
+            const response = await OpenTargetsMCP.serve("/mcp", { binding: "MCP_OBJECT" }).fetch(request, env, ctx);
             
             // Add protocol version header if provided in request
             if (protocolVersion && response instanceof Response) {
@@ -599,7 +587,7 @@ export default {
             const protocolVersion = request.headers.get("MCP-Protocol-Version");
             
             // @ts-ignore - SSE transport handling
-            const response = await OpenTargetsMCP.serveSSE("/sse").fetch(request, env, ctx);
+            const response = await OpenTargetsMCP.serveSSE("/sse", { binding: "MCP_OBJECT" }).fetch(request, env, ctx);
             
             if (protocolVersion && response instanceof Response) {
                 const headers = new Headers(response.headers);
@@ -619,7 +607,7 @@ export default {
                 data_access_id: id,
                 ...info
             }));
-            return new Response(JSON.stringify({ datasets: list }, null, 2), {
+            return new Response(JSON.stringify({ datasets: list }), {
                 headers: { "Content-Type": "application/json" }
             });
         }
